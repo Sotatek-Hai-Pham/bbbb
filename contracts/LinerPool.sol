@@ -3,24 +3,19 @@ pragma solidity 0.8.4;
 
 import "./interfaces/IPoolFactory.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
-import "@openzeppelin/contracts-upgradeable/security/PausableUpgradeable.sol";
+import "@openzeppelin/contracts/security/Pausable.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
-import "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
-import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
-import "@openzeppelin/contracts-upgradeable/security/ReentrancyGuardUpgradeable.sol";
-import "@openzeppelin/contracts-upgradeable/utils/math/SafeCastUpgradeable.sol";
-import "@openzeppelin/contracts-upgradeable/utils/structs/EnumerableSetUpgradeable.sol";
+import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
+import "@openzeppelin/contracts/access/IAccessControl.sol";
 
 contract LinearPool is
-    Initializable,
-    OwnableUpgradeable,
-    ReentrancyGuardUpgradeable,
-    PausableUpgradeable
+    ReentrancyGuard,
+    Pausable
 {
     using SafeERC20 for IERC20;
-    using SafeCastUpgradeable for uint256;
-    using EnumerableSetUpgradeable for EnumerableSetUpgradeable.UintSet;
 
+    bytes32 public constant MOD = keccak256("MOD");
+    bytes32 public constant ADMIN = keccak256("ADMIN");
     uint32 private constant ONE_YEAR_IN_SECONDS = 365 days;
 
     uint8 public MAX_NUMBER_TOKEN = 5;
@@ -53,27 +48,11 @@ contract LinearPool is
     // Allow emergency withdraw feature
     bool public linearAllowEmergencyWithdraw;
 
-    event LinearDeposit(
-        address indexed account,
-        uint256 amount
-    );
-    event LinearWithdraw(
-        address indexed account,
-        uint256 amount
-    );
-    event LinearRewardsHarvested(
-        address indexed account,
-        uint256 reward
-    );
-    event LinearPendingWithdraw(
-        address indexed account,
-        uint256 amount
-    );
-    event LinearEmergencyWithdraw(
-        address indexed account,
-        uint256 amount
-    );
-
+    event LinearDeposit(address indexed account, uint256[] amount);
+    event LinearWithdraw(address indexed account, uint256[] amount);
+    event LinearRewardsHarvested(address indexed account, uint256[] reward);
+    event LinearPendingWithdraw(address indexed account, uint256[] amount);
+    event LinearEmergencyWithdraw(address indexed account, uint256[] amount);
 
     struct LinearStakingData {
         uint256[] balance;
@@ -81,13 +60,6 @@ contract LinearPool is
         uint256 updatedTime;
         uint256[] reward;
     }
-
-
-    event LinearClaimPendingWithdraw(
-        address account,
-        uint256 amount
-    );
-
 
     event LinearAddWhitelist(address account);
     event LinearRemoveWhitelist(address account);
@@ -97,6 +69,21 @@ contract LinearPool is
     event AssignStakingData(address from, address to);
     event AdminRecoverFund(address token, address to, uint256 amount);
 
+    modifier isMod() {
+        require(
+            IAccessControl(factory).hasRole(MOD, msg.sender),
+            "LinearStakingPool: forbidden"
+        );
+        _;
+    }
+
+    modifier isAdmin() {
+        require(
+            IAccessControl(factory).hasRole(ADMIN, msg.sender),
+            "LinearStakingPool: forbidden"
+        );
+        _;
+    }
 
     /**
      * @notice Initialize the contract, get called in the first time deploy
@@ -116,7 +103,8 @@ contract LinearPool is
         ) = IPoolFactory(msg.sender).linerParameters();
 
         uint256 _rewardLength = _stakeToken.length;
-        require(_rewardLength <= MAX_NUMBER_TOKEN,
+        require(
+            _rewardLength <= MAX_NUMBER_TOKEN,
             "LinearStakingPool: inffuse token numbers"
         );
         require(
@@ -130,22 +118,22 @@ contract LinearPool is
         );
 
         require(
-            _rewardLength == _saleToken.length && _rewardLength == _APR.length ,
+            _rewardLength == _saleToken.length && _rewardLength == _APR.length,
             "LinearStakingPool: invalid token length"
         );
 
-        for(uint8 i=0; i<_rewardLength; ) {
-          require( 
-            _saleToken[i] != address(0) && _stakeToken[i] != address(0),
-            "LinearStakingPool: invalid token address"
-          );
-          linearAcceptedToken[i] = IERC20(_stakeToken[i]);
-          linearRewardToken[i] = IERC20(_saleToken[i]);
-          APR[i] = _APR[i];
+        for (uint8 i = 0; i < _rewardLength; ) {
+            require(
+                _saleToken[i] != address(0) && _stakeToken[i] != address(0),
+                "LinearStakingPool: invalid token address"
+            );
+            linearAcceptedToken[i] = IERC20(_stakeToken[i]);
+            linearRewardToken[i] = IERC20(_saleToken[i]);
+            APR[i] = _APR[i];
 
-          unchecked {
-            i++;
-          }
+            unchecked {
+                i++;
+            }
         }
 
         factory = msg.sender;
@@ -156,19 +144,20 @@ contract LinearPool is
         maxInvestment = _maxInvestment;
         lockDuration = _lockDuration;
         linearRewardDistributor = _rewardDistributor;
+
     }
 
     /**
      * @notice Pause contract
      */
-    function pauseContract() public onlyOwner {
+    function pauseContract() external isMod  {
         _pause();
     }
 
     /**
      * @notice Unpause contract
      */
-    function unpauseContract() external onlyOwner {
+    function unpauseContract() external isMod {
         _unpause();
     }
 
@@ -182,7 +171,7 @@ contract LinearPool is
         address _token,
         address _to,
         uint256 _amount
-    ) external onlyOwner {
+    ) external isAdmin {
         IERC20(_token).safeTransfer(_to, _amount);
         emit AdminRecoverFund(_token, _to, _amount);
     }
@@ -193,13 +182,26 @@ contract LinearPool is
      */
     function linearSetRewardDistributor(address _linearRewardDistributor)
         external
-        onlyOwner
+        isAdmin
     {
         require(
             _linearRewardDistributor != address(0),
             "LinearStakingPool: invalid reward distributor"
         );
         linearRewardDistributor = _linearRewardDistributor;
+    }
+    
+
+    /**
+     * @notice Set max numbers the rewards Can only be called by the owner.
+     * @param _num the reward distributor
+     */
+    function linearSetRewardDistributor(uint8 _num)
+        external
+        isAdmin
+    {
+        
+        MAX_NUMBER_TOKEN = _num;
     }
 
     /**
@@ -215,7 +217,9 @@ contract LinearPool is
 
         _linearDeposit(_amount, account);
 
-        linearAcceptedToken.safeTransferFrom(account, address(this), _amount);
+        for(uint8 i=0; i<_amount.length; i++) {
+            linearAcceptedToken[i].safeTransferFrom(account, address(this), _amount[i]);
+        }
         emit LinearDeposit(account, _amount);
     }
 
@@ -224,17 +228,16 @@ contract LinearPool is
      * @param _amount amount of token to deposit
      * @param _receiver receiver
      */
-    function linearDepositSpecifyReceiver(
-        uint256 _amount,
-        address _receiver
-    ) external nonReentrant whenNotPaused {
+    function linearDepositSpecifyReceiver(uint256[] memory _amount, address _receiver)
+        external
+        nonReentrant
+        whenNotPaused
+    {
         _linearDeposit(_amount, _receiver);
 
-        linearAcceptedToken.safeTransferFrom(
-            msg.sender,
-            address(this),
-            _amount
-        );
+        for(uint8 i=0; i<_amount.length; i++) {
+            linearAcceptedToken[i].safeTransferFrom(msg.sender, address(this), _amount[i]);
+        }
         emit LinearDeposit(_receiver, _amount);
     }
 
@@ -242,15 +245,13 @@ contract LinearPool is
      * @notice Withdraw token from a pool
      * @param _amount amount to withdraw
      */
-    function linearWithdraw(uint256 _amount)
+    function linearWithdraw(uint256[] memory _amount)
         external
         nonReentrant
         whenNotPaused
     {
         address account = msg.sender;
-        LinearStakingData storage stakingData = linearStakingData[
-            account
-        ];
+        LinearStakingData storage stakingData = linearStakingData[account];
 
         require(
             block.timestamp >= stakingData.joinTime + lockDuration,
@@ -258,95 +259,50 @@ contract LinearPool is
         );
 
         require(
-            stakingData.balance >= _amount,
-            "LinearStakingPool: invalid withdraw amount"
+            stakingData.balance.length > 0,
+            "LinearStakingPool: nothing to withdraw"
         );
 
         _linearHarvest(account);
+        uint256[] memory _rewards = new uint256[](stakingData.balance.length);
+        require(
+            linearRewardDistributor != address(0),
+            "LinearStakingPool: invalid reward distributor"
+        );
 
-        if (stakingData.reward > 0) {
+        for(uint8 i=0; i<stakingData.balance.length; i++) {
+
             require(
-                linearRewardDistributor != address(0),
-                "LinearStakingPool: invalid reward distributor"
+                stakingData.reward[i] >= _amount[i],
+                "LinearStakingPool: invalid withdraw amount"
             );
 
-            uint256 reward = stakingData.reward;
-            stakingData.reward = 0;
-            linearAcceptedToken.safeTransferFrom(
-                linearRewardDistributor,
-                account,
-                reward
-            );
-            emit LinearRewardsHarvested( account, reward);
+            if (stakingData.reward[i] > 0) {
+
+                uint256 reward = stakingData.reward[i];
+                stakingData.reward[i] = 0;
+                linearRewardToken[i].safeTransferFrom(
+                    linearRewardDistributor,
+                    account,
+                    reward
+                );
+                _rewards[i] = reward;
+            }
+
+            stakingData.balance[i] -= _amount[i];
+            linearAcceptedToken[i].safeTransfer(account, _amount[i]);
         }
 
-
-        stakingData.balance -= _amount;
-        linearAcceptedToken.safeTransfer(account, _amount);
-
+        emit LinearRewardsHarvested(account, _rewards);
         emit LinearWithdraw(account, _amount);
-    }
-
-    /**
-     * @notice Withdraw token from a pool
-     */
-    function linearWithdrawAll()
-        external
-        nonReentrant
-        whenNotPaused
-    {
-        address account = msg.sender;
-        LinearStakingData storage stakingData = linearStakingData[
-            account
-        ];
-
-        require(
-            block.timestamp >= stakingData.joinTime + lockDuration,
-            "LinearStakingPool: still locked"
-        );
-
-        require(
-            stakingData.balance >= 0,
-            "LinearStakingPool: invalid withdraw amount"
-        );
-
-        _linearHarvest(account);
-
-        if (stakingData.reward > 0) {
-            require(
-                linearRewardDistributor != address(0),
-                "LinearStakingPool: invalid reward distributor"
-            );
-
-            uint256 reward = stakingData.reward;
-            stakingData.reward = 0;
-            linearAcceptedToken.safeTransferFrom(
-                linearRewardDistributor,
-                account,
-                reward
-            );
-            emit LinearRewardsHarvested(account, reward);
-        }
-
-        uint256 withdrawBalance = stakingData.balance;
-        stakingData.balance = 0;
-        linearAcceptedToken.safeTransfer(account, withdrawBalance);
-
-        emit LinearWithdraw(account, withdrawBalance);
     }
 
     /**
      * @notice Claim reward token from a pool
      */
-    function linearClaimReward()
-        external
-        nonReentrant
-        whenNotPaused
-    {
+    function linearClaimReward() external nonReentrant whenNotPaused {
         address account = msg.sender;
-        LinearStakingData storage stakingData = linearStakingData[
-            account
-        ];
+        LinearStakingData storage stakingData = linearStakingData[account];
 
         require(
             block.timestamp >= stakingData.joinTime + lockDuration,
@@ -354,36 +310,39 @@ contract LinearPool is
         );
 
         _linearHarvest(account);
+        uint256[] memory _rewards = new uint256[](stakingData.balance.length);
+        require(
+            linearRewardDistributor != address(0),
+            "LinearStakingPool: invalid reward distributor"
+        );
 
-        if (stakingData.reward > 0) {
-            require(
-                linearRewardDistributor != address(0),
-                "LinearStakingPool: invalid reward distributor"
-            );
-            uint256 reward = stakingData.reward;
-            stakingData.reward = 0;
-            linearAcceptedToken.safeTransferFrom(
-                linearRewardDistributor,
-                account,
-                reward
-            );
-            emit LinearRewardsHarvested(account, reward);
+        for(uint8 i=0; i<stakingData.balance.length; i++) {
+        
+            if (stakingData.reward[i] > 0) {
+                uint256 reward = stakingData.reward[i];
+                stakingData.reward[i] = 0;
+                linearRewardToken[i].safeTransferFrom(
+                    linearRewardDistributor,
+                    account,
+                    reward
+                );
+                _rewards[i] = reward;
+            }        
         }
+        emit LinearRewardsHarvested(account, _rewards);
     }
 
     /**
      * @notice Gets number of reward tokens of a user from a pool
      * @param _account address of a user
-     * @return reward earned reward of a user
+     * @return rewards earned reward of a user
      */
     function linearPendingReward(address _account)
         public
         view
-        returns (uint256[] memory reward)
+        returns (uint256[] memory rewards)
     {
-        LinearStakingData storage stakingData = linearStakingData[
-            _account
-        ];
+        LinearStakingData storage stakingData = linearStakingData[_account];
 
         uint256 startTime = stakingData.updatedTime > 0
             ? stakingData.updatedTime
@@ -403,12 +362,13 @@ contract LinearPool is
 
         if (stakedTimeInSeconds > lockDuration)
             stakedTimeInSeconds = lockDuration;
-
-        uint256 pendingReward = ((stakingData.balance *
-            stakedTimeInSeconds *
-            APR) / ONE_YEAR_IN_SECONDS) / 100;
-
-        reward = stakingData.reward + pendingReward;
+        rewards = new uint256[](stakingData.balance.length);
+        for (uint8 i = 0; i < stakingData.balance.length; i++) {
+            uint256 pendingReward = ((stakingData.balance[i] *
+                stakedTimeInSeconds *
+                APR[i]) / ONE_YEAR_IN_SECONDS) / 1e20;
+            rewards[i] = stakingData.reward[i] + pendingReward;
+        }
     }
 
     /**
@@ -416,11 +376,7 @@ contract LinearPool is
      * @param _account address of a user
      * @return total token deposited in a pool by a user
      */
-    function linearBalanceOf( address _account)
-        external
-        view
-        returns (uint256)
-    {
+    function linearBalanceOf(address _account) external view returns (uint256[] memory) {
         return linearStakingData[_account].balance;
     }
 
@@ -429,7 +385,7 @@ contract LinearPool is
      * @param _account address of a user
      * @return total token deposited in a pool by a user
      */
-    function linearUserStakingData( address _account)
+    function linearUserStakingData(address _account)
         external
         view
         returns (LinearStakingData memory)
@@ -443,7 +399,7 @@ contract LinearPool is
      */
     function linearSetAllowEmergencyWithdraw(bool _shouldAllow)
         external
-        onlyOwner
+        
     {
         linearAllowEmergencyWithdraw = _shouldAllow;
     }
@@ -451,43 +407,36 @@ contract LinearPool is
     /**
      * @notice Withdraw without caring about rewards. EMERGENCY ONLY.
      */
-    function linearEmergencyWithdraw()
-        external
-        nonReentrant
-        whenNotPaused
-    {
+    function linearEmergencyWithdraw() external nonReentrant whenNotPaused {
         require(
             linearAllowEmergencyWithdraw,
             "LinearStakingPool: emergency withdrawal is not allowed yet"
         );
 
         address account = msg.sender;
-        LinearStakingData storage stakingData = linearStakingData[
-            account
-        ];
+        LinearStakingData storage stakingData = linearStakingData[account];
 
         require(
-            stakingData.balance > 0,
+            stakingData.balance.length > 0,
             "LinearStakingPool: nothing to withdraw"
         );
 
-        uint256 amount = stakingData.balance;
+        uint256[] memory amount = stakingData.balance;
 
-        stakingData.balance = 0;
-        stakingData.reward = 0;
+        stakingData.balance = new uint256[](stakingData.balance.length);
+        stakingData.reward = new uint256[](stakingData.balance.length);
         stakingData.updatedTime = block.timestamp;
 
-        linearAcceptedToken.safeTransfer(account, amount);
-        emit LinearEmergencyWithdraw( account, amount);
+        for(uint8 i=0; i< amount.length; i++) {
+            linearAcceptedToken[i].safeTransfer(account, amount[i]);
+        }
+        emit LinearEmergencyWithdraw(account, amount);
     }
 
-    function _linearDeposit(
-        uint256[] memory _amount,
-        address account
-    ) internal {
-        LinearStakingData storage stakingData = linearStakingData[
-            account
-        ];
+    function _linearDeposit(uint256[] memory _amount, address account)
+        internal
+    {
+        LinearStakingData storage stakingData = linearStakingData[account];
 
         require(
             _amount.length == stakingData.balance.length,
@@ -506,18 +455,22 @@ contract LinearPool is
 
         _linearHarvest(account);
 
-        stakingData.balance += _amount;
+        for(uint8 i=0; i< _amount.length; i++){
+            stakingData.balance[i] += _amount[i];
+        }
         stakingData.joinTime = block.timestamp;
-
     }
 
     function _linearHarvest(address _account) private {
-        LinearStakingData storage stakingData = linearStakingData[
-            _account
-        ];
+        LinearStakingData storage stakingData = linearStakingData[_account];
+        uint256 _length = stakingData.balance.length;
+        if (_length == 0) {
+            uint256[] memory _tempArr = new uint256[](_length);
+            stakingData.balance = _tempArr;
+            stakingData.reward = _tempArr;
+        }
 
         stakingData.reward = linearPendingReward(_account);
         stakingData.updatedTime = block.timestamp;
     }
-
 }

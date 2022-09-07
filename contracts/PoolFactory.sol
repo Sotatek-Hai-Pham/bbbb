@@ -22,6 +22,7 @@ contract PoolFactory is IPoolFactory, AccessControl {
 
     function linerParameters()
         external
+        view
         override
         returns (
             address[] memory stakeToken,
